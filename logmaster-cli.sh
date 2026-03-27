@@ -1621,7 +1621,7 @@ network_menu() {
         echo ""
         print_separator
         echo ""
-        echo "  ${BOLD}Configuración:${NC}"
+        echo -e "  ${BOLD}Configuración:${NC}"
         echo "   1) Configurar identidad del nodo (rol, nombre)"
         if [ "$(get_node_role)" = "slave" ] || [ "$(get_node_role)" = "standalone" ]; then
             echo "   2) Configurar conexión al Master"
