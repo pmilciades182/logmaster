@@ -834,7 +834,7 @@ schedules_menu() {
 
         local scheds
         scheds=$(db_query "
-            SELECT s.id, d.source_path, s.schedule_type, s.interval_minutes,
+            SELECT s.id, s.directory_id, d.source_path, s.schedule_type, s.interval_minutes,
                    s.run_at_time, s.days_of_week, s.last_run, s.next_run, s.active
             FROM schedules s
             JOIN directories d ON d.id = s.directory_id
@@ -844,7 +844,7 @@ schedules_menu() {
         if [ -n "$scheds" ]; then
             printf "  ${WHITE}%-4s %-28s %-10s %-18s %-20s %-6s${NC}\n" "ID" "Directorio" "Tipo" "Programación" "Próxima ejecución" "Estado"
             print_separator
-            while IFS='|' read -r sid spath stype interval run_at days last_run next_run active; do
+            while IFS='|' read -r sid sdirid spath stype interval run_at days last_run next_run active; do
                 local estado prog display_time
                 [ "$active" = "1" ] && estado="${GREEN}Act${NC}" || estado="${RED}Ina${NC}"
                 [[ "$run_at" =~ ^[0-9]{4}$ ]] && display_time="${run_at:0:2}:${run_at:2:2}" || display_time="$run_at"
@@ -862,9 +862,8 @@ schedules_menu() {
                     SELECT dd.dest_type, dd.action, dd.local_path, dd.remote_subdir,
                            st.name, st.server, st.share
                     FROM directory_destinations dd
-                    JOIN directories d ON d.id = dd.directory_id
                     LEFT JOIN samba_targets st ON st.id = dd.samba_target_id
-                    WHERE d.source_path='${spath}' AND dd.active=1
+                    WHERE dd.directory_id=${sdirid} AND dd.active=1
                 ")
                 if [ -n "$dests" ]; then
                     while IFS='|' read -r dtype action lpath rsubdir stname server share; do
