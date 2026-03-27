@@ -233,9 +233,8 @@ directories_add() {
             print_warn "Directorio no existe: $path (se agregará de todas formas)"
         fi
 
-        db_exec "INSERT INTO directories (source_path) VALUES ('$path')"
         local new_id
-        new_id=$(db_get "SELECT last_insert_rowid()")
+        new_id=$(db_get "INSERT INTO directories (source_path) VALUES ('$path'); SELECT last_insert_rowid();")
 
         print_ok "Directorio [ID=$new_id]: $path"
         count=$((count + 1))
