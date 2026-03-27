@@ -652,17 +652,32 @@ samba_delete() {
     name=$(db_get "SELECT name FROM samba_targets WHERE id=$del_id")
     [ -z "$name" ] && { print_err "ID no encontrado"; pause; return; }
 
-    # Verificar si está en uso
     local in_use
     in_use=$(db_get "SELECT COUNT(*) FROM directory_destinations WHERE samba_target_id=$del_id")
+
     if [ "$in_use" -gt 0 ]; then
-        print_warn "Este destino está asignado a $in_use directorio(s)"
+        print_warn "Este destino está asignado a $in_use directorio(s):"
+        db_query "SELECT d.source_path FROM directory_destinations dd
+                  JOIN directories d ON d.id = dd.directory_id
+                  WHERE dd.samba_target_id=$del_id" | while read -r p; do
+            echo "    - $p"
+        done
+        echo ""
+        if ! confirm "¿Eliminar en cascada (también se borrarán esos destinos)?"; then
+            print_info "Operación cancelada"
+            pause
+            return
+        fi
+        db_exec "DELETE FROM directory_destinations WHERE samba_target_id=$del_id"
+    else
+        if ! confirm "¿Eliminar destino Samba '$name'?"; then
+            pause
+            return
+        fi
     fi
 
-    if confirm "¿Eliminar destino Samba '$name'?"; then
-        db_exec "DELETE FROM samba_targets WHERE id=$del_id"
-        print_ok "Destino '$name' eliminado del catálogo"
-    fi
+    db_exec "DELETE FROM samba_targets WHERE id=$del_id"
+    print_ok "Destino '$name' eliminado del catálogo"
     pause
 }
 
