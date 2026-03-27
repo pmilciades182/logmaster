@@ -1,13 +1,14 @@
 #!/bin/bash
 # ============================================================
-# LogMaster v1.1 - Frontend de Consola Interactivo
-# Soporta múltiples destinos (Samba/Local) por directorio
+# LogMaster v2.0 - Frontend de Consola Interactivo
+# Arquitectura Master/Slave con sincronización SSH
 # ============================================================
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/functions.sh"
+source "${SCRIPT_DIR}/lib/sync.sh"
 
 db_init
 
@@ -22,31 +23,46 @@ main_menu() {
         echo -e "  ${BOLD}MENÚ PRINCIPAL${NC}"
         print_separator
         echo ""
-        echo "  1) Gestionar directorios fuente y destinos"
-        echo "  2) Gestionar catálogo Samba"
-        echo "  3) Gestionar filtros de archivos"
-        echo "  4) Gestionar programación"
-        echo "  5) Configurar correo electrónico"
-        echo "  6) Ver historial de ejecuciones"
-        echo "  7) Ejecutar transferencia manual"
-        echo "  8) Instalar / Desinstalar cron"
-        echo "  9) Estado del sistema"
-        echo "  0) Salir"
+        # Mostrar rol del nodo
+        local current_role current_name
+        current_role=$(get_node_role)
+        current_name=$(db_get "SELECT node_name FROM node_config WHERE id=1")
+        local role_label
+        case "$current_role" in
+            master)     role_label="${GREEN}MASTER${NC}" ;;
+            slave)      role_label="${YELLOW}SLAVE${NC}" ;;
+            standalone) role_label="${CYAN}STANDALONE${NC}" ;;
+        esac
+        echo -e "  Nodo: ${WHITE}${current_name:-$(hostname)}${NC}  Rol: ${role_label}"
+        echo ""
+
+        echo "   1) Directorios fuente y destinos"
+        echo "   2) Catálogo Samba"
+        echo "   3) Filtros de archivos"
+        echo "   4) Programación"
+        echo "   5) Correo electrónico"
+        echo "   6) Historial de ejecuciones"
+        echo "   7) Ejecutar transferencia manual"
+        echo "   8) Cron (instalar/desinstalar)"
+        echo "   9) Estado del sistema"
+        echo -e "  ${MAGENTA}10) Red y Sincronización${NC}"
+        echo "   0) Salir"
         echo ""
         echo -en "  ${CYAN}Opción:${NC} "
         read -r opt
         case "$opt" in
-            1) directories_menu ;;
-            2) samba_menu ;;
-            3) filters_menu ;;
-            4) schedules_menu ;;
-            5) email_menu ;;
-            6) log_menu ;;
-            7) manual_exec_menu ;;
-            8) cron_menu ;;
-            9) status_menu ;;
-            0) echo ""; print_ok "Hasta luego."; exit 0 ;;
-            *) print_err "Opción inválida" ; sleep 1 ;;
+            1)  directories_menu ;;
+            2)  samba_menu ;;
+            3)  filters_menu ;;
+            4)  schedules_menu ;;
+            5)  email_menu ;;
+            6)  log_menu ;;
+            7)  manual_exec_menu ;;
+            8)  cron_menu ;;
+            9)  status_menu ;;
+            10) network_menu ;;
+            0)  echo ""; print_ok "Hasta luego."; exit 0 ;;
+            *)  print_err "Opción inválida" ; sleep 1 ;;
         esac
     done
 }
@@ -1330,52 +1346,86 @@ cron_menu() {
         print_separator
         echo ""
 
-        local cron_entry="* * * * * ${SCRIPT_DIR}/logmaster.sh >> ${LOGMASTER_LOG} 2>&1"
+        local cron_transfer="* * * * * ${SCRIPT_DIR}/logmaster.sh >> ${LOGMASTER_LOG} 2>&1"
+        local cron_sync="* * * * * ${SCRIPT_DIR}/logmaster-sync.sh >> ${LOGMASTER_LOG} 2>&1"
 
+        echo -e "  ${BOLD}Transferencias:${NC}"
         if crontab -l 2>/dev/null | grep -q "logmaster.sh"; then
-            echo -e "  Estado: ${GREEN}INSTALADO en crontab${NC}"
-            echo ""
-            echo -e "  Entrada actual:"
-            crontab -l 2>/dev/null | grep "logmaster" | while IFS= read -r line; do
-                echo -e "  ${WHITE}$line${NC}"
+            echo -e "    ${GREEN}INSTALADO${NC}"
+            crontab -l 2>/dev/null | grep "logmaster.sh" | while IFS= read -r line; do
+                echo -e "    ${DIM}$line${NC}"
             done
         else
-            echo -e "  Estado: ${YELLOW}NO instalado en crontab${NC}"
+            echo -e "    ${YELLOW}NO instalado${NC}"
         fi
 
         echo ""
-        echo -e "  Entrada a instalar:"
-        echo -e "  ${CYAN}$cron_entry${NC}"
+        echo -e "  ${BOLD}Sincronización:${NC}"
+        if crontab -l 2>/dev/null | grep -q "logmaster-sync.sh"; then
+            echo -e "    ${GREEN}INSTALADO${NC}"
+            crontab -l 2>/dev/null | grep "logmaster-sync.sh" | while IFS= read -r line; do
+                echo -e "    ${DIM}$line${NC}"
+            done
+        else
+            echo -e "    ${YELLOW}NO instalado${NC}"
+        fi
+
         echo ""
-        echo "  i) Instalar en crontab"
-        echo "  u) Desinstalar de crontab"
+        echo "  1) Instalar transferencias en crontab"
+        echo "  2) Instalar sincronización en crontab"
+        echo "  3) Instalar AMBOS en crontab"
+        echo "  4) Desinstalar transferencias"
+        echo "  5) Desinstalar sincronización"
+        echo "  6) Desinstalar TODO"
         echo "  v) Volver"
         echo ""
         echo -en "  ${CYAN}Opción:${NC} "
         read -r opt
         case "$opt" in
-            i)
+            1)
                 if crontab -l 2>/dev/null | grep -q "logmaster.sh"; then
-                    print_warn "Ya está instalado en crontab"
+                    print_warn "Transferencias ya instaladas"
                 else
-                    (crontab -l 2>/dev/null; echo "$cron_entry") | crontab -
-                    if [ $? -eq 0 ]; then
-                        print_ok "Instalado en crontab (cada 1 minuto)"
-                        log_info "Cron instalado"
-                    else
-                        print_err "Error al instalar en crontab"
-                    fi
+                    (crontab -l 2>/dev/null; echo "$cron_transfer") | crontab -
+                    print_ok "Transferencias instaladas (cada 1 minuto)"
+                    log_info "Cron transferencias instalado"
                 fi
-                pause
-                ;;
-            u)
-                if confirm "¿Desinstalar LogMaster del crontab?"; then
-                    crontab -l 2>/dev/null | grep -v "logmaster.sh" | crontab -
-                    print_ok "Desinstalado de crontab"
-                    log_info "Cron desinstalado"
+                pause ;;
+            2)
+                if crontab -l 2>/dev/null | grep -q "logmaster-sync.sh"; then
+                    print_warn "Sincronización ya instalada"
+                else
+                    (crontab -l 2>/dev/null; echo "$cron_sync") | crontab -
+                    print_ok "Sincronización instalada (cada 1 minuto)"
+                    log_info "Cron sincronización instalado"
                 fi
-                pause
-                ;;
+                pause ;;
+            3)
+                local changed=0
+                if ! crontab -l 2>/dev/null | grep -q "logmaster.sh"; then
+                    (crontab -l 2>/dev/null; echo "$cron_transfer") | crontab -
+                    changed=1
+                fi
+                if ! crontab -l 2>/dev/null | grep -q "logmaster-sync.sh"; then
+                    (crontab -l 2>/dev/null; echo "$cron_sync") | crontab -
+                    changed=1
+                fi
+                [ "$changed" -eq 1 ] && print_ok "Ambos servicios instalados" || print_warn "Ya estaban instalados"
+                pause ;;
+            4)
+                crontab -l 2>/dev/null | grep -v "logmaster.sh" | crontab -
+                print_ok "Transferencias desinstaladas"
+                pause ;;
+            5)
+                crontab -l 2>/dev/null | grep -v "logmaster-sync.sh" | crontab -
+                print_ok "Sincronización desinstalada"
+                pause ;;
+            6)
+                if confirm "¿Desinstalar TODO de crontab?"; then
+                    crontab -l 2>/dev/null | grep -v "logmaster" | crontab -
+                    print_ok "Todo desinstalado de crontab"
+                fi
+                pause ;;
             v) return ;;
         esac
     done
@@ -1466,7 +1516,7 @@ status_menu() {
 
     echo ""
     echo -e "  ${BOLD}Dependencias:${NC}"
-    for cmd in sqlite3 smbclient curl; do
+    for cmd in sqlite3 smbclient curl ssh scp; do
         if command -v "$cmd" &>/dev/null; then
             print_ok "$cmd: $(command -v "$cmd")"
         else
@@ -1474,6 +1524,660 @@ status_menu() {
         fi
     done
 
+    # Info de red
+    echo ""
+    local role node_name last_sync
+    role=$(get_node_role)
+    node_name=$(db_get "SELECT node_name FROM node_config WHERE id=1")
+    last_sync=$(db_get "SELECT last_sync FROM node_config WHERE id=1")
+
+    echo -e "  ${BOLD}Red:${NC}"
+    echo -e "  Nodo:    ${WHITE}${node_name:-$(hostname)}${NC}"
+    echo -e "  Rol:     ${WHITE}${role}${NC}"
+    echo -e "  Últ.sync:${WHITE} ${last_sync:-Nunca}${NC}"
+
+    if [ "$role" = "master" ]; then
+        local n_nodes
+        n_nodes=$(db_get "SELECT COUNT(*) FROM registered_nodes WHERE active=1")
+        echo -e "  Slaves:  ${WHITE}${n_nodes}${NC}"
+    fi
+
+    pause
+}
+
+# ============================================================
+# RED Y SINCRONIZACIÓN
+# ============================================================
+
+network_menu() {
+    while true; do
+        clear
+        print_header
+        echo -e "  ${BOLD}${MAGENTA}RED Y SINCRONIZACIÓN${NC}"
+        print_separator
+        echo ""
+
+        # Mostrar config actual del nodo
+        local nrow
+        nrow=$(db_query "SELECT node_id, node_name, node_role, master_host, master_port,
+                         master_user, sync_mode, sync_interval, last_sync,
+                         sync_samba_catalog, push_status, autonomous_on_fail
+                         FROM node_config WHERE id=1")
+
+        if [ -n "$nrow" ]; then
+            IFS='|' read -r nid nname nrole mhost mport muser smode sint lsync \
+                ssamba spush sauto <<< "$nrow"
+
+            local role_color
+            case "$nrole" in
+                master)     role_color="${GREEN}MASTER${NC}" ;;
+                slave)      role_color="${YELLOW}SLAVE${NC}" ;;
+                standalone) role_color="${CYAN}STANDALONE${NC}" ;;
+            esac
+
+            echo -e "  ID Nodo:        ${WHITE}${nid}${NC}"
+            echo -e "  Nombre:         ${WHITE}${nname:-$(hostname)}${NC}"
+            echo -e "  Rol:            ${role_color}"
+            echo -e "  Última sync:    ${WHITE}${lsync:-Nunca}${NC}"
+
+            if [ "$nrole" = "slave" ]; then
+                echo ""
+                echo -e "  ${BOLD}Conexión al Master:${NC}"
+                echo -e "  Host:           ${WHITE}${mhost:-No configurado}${NC}"
+                echo -e "  Puerto SSH:     ${WHITE}${mport}${NC}"
+                echo -e "  Usuario SSH:    ${WHITE}${muser:-No configurado}${NC}"
+                local smode_txt
+                [ "$smode" = "mandatory" ] && smode_txt="${RED}OBLIGATORIA${NC}" || smode_txt="${GREEN}OPCIONAL${NC}"
+                echo -e "  Sincronización: ${smode_txt}"
+                echo -e "  Intervalo:      ${WHITE}${sint}min${NC}"
+                echo -e "  Recibir Samba:  $([ "$ssamba" = "1" ] && echo "${GREEN}Sí${NC}" || echo "${YELLOW}No${NC}")"
+                echo -e "  Enviar estado:  $([ "$spush" = "1" ] && echo "${GREEN}Sí${NC}" || echo "${YELLOW}No${NC}")"
+                echo -e "  Autónomo:       $([ "$sauto" = "1" ] && echo "${GREEN}Sí${NC}" || echo "${YELLOW}No${NC}")"
+            fi
+
+            if [ "$nrole" = "master" ]; then
+                echo ""
+                echo -e "  ${BOLD}Slaves Registrados:${NC}"
+                local slaves
+                slaves=$(db_query "SELECT id, node_name, host, status, last_seen FROM registered_nodes WHERE active=1 ORDER BY id")
+                if [ -n "$slaves" ]; then
+                    printf "  ${WHITE}%-4s %-20s %-18s %-10s %-20s${NC}\n" "ID" "Nombre" "Host" "Estado" "Último contacto"
+                    while IFS='|' read -r sid sname shost sstatus slast; do
+                        local st_color
+                        case "$sstatus" in
+                            online)  st_color="$GREEN" ;;
+                            offline) st_color="$RED" ;;
+                            error)   st_color="$RED" ;;
+                            *)       st_color="$YELLOW" ;;
+                        esac
+                        printf "  %-4s %-20s %-18s ${st_color}%-10s${NC} %-20s\n" "$sid" "$sname" "$shost" "$sstatus" "${slast:--}"
+                    done <<< "$slaves"
+                else
+                    print_warn "  Sin slaves registrados"
+                fi
+            fi
+        fi
+
+        echo ""
+        print_separator
+        echo ""
+        echo "  ${BOLD}Configuración:${NC}"
+        echo "   1) Configurar identidad del nodo (rol, nombre)"
+        if [ "$(get_node_role)" = "slave" ] || [ "$(get_node_role)" = "standalone" ]; then
+            echo "   2) Configurar conexión al Master"
+            echo "   3) Probar conexión al Master"
+        fi
+        if [ "$(get_node_role)" = "master" ]; then
+            echo "   4) Registrar un slave"
+            echo "   5) Eliminar un slave"
+            echo "   6) Recolectar estado de todos los slaves"
+            echo "   7) Distribuir catálogo Samba a slaves"
+            echo "   8) Gestionar canales de comunicación"
+            echo "   9) Ver estado detallado de un slave"
+        fi
+        echo "  10) Forzar sincronización ahora"
+        echo "  11) Ver historial de sincronizaciones"
+        echo "  12) Generar par de llaves SSH"
+        echo "   v) Volver"
+        echo ""
+        echo -en "  ${CYAN}Opción:${NC} "
+        read -r opt
+        case "$opt" in
+            1)  net_configure_node ;;
+            2)  net_configure_master_conn ;;
+            3)  net_test_master ;;
+            4)  net_register_slave ;;
+            5)  net_remove_slave ;;
+            6)  net_collect_all ;;
+            7)  net_push_samba_all ;;
+            8)  channels_menu ;;
+            9)  net_slave_detail ;;
+            10) net_force_sync ;;
+            11) net_sync_log ;;
+            12) net_generate_ssh_key ;;
+            v)  return ;;
+        esac
+    done
+}
+
+net_configure_node() {
+    echo ""
+    echo -e "  ${BOLD}CONFIGURAR IDENTIDAD DEL NODO${NC}"
+    print_separator
+
+    local old_name old_role
+    old_name=$(db_get "SELECT node_name FROM node_config WHERE id=1")
+    old_role=$(db_get "SELECT node_role FROM node_config WHERE id=1")
+
+    read_input "Nombre del nodo [$old_name]" node_name "${old_name:-$(hostname)}"
+
+    echo ""
+    echo "  Rol del nodo:"
+    echo "    1) standalone - Opera de forma independiente (sin red)"
+    echo "    2) master     - Central que coordina slaves"
+    echo "    3) slave      - Nodo que reporta a un master"
+    echo ""
+    local role_opt
+    case "$old_role" in
+        standalone) echo -en "  Opción [1 = actual standalone]: "; read -r role_opt; role_opt="${role_opt:-1}" ;;
+        master)     echo -en "  Opción [2 = actual master]: "; read -r role_opt; role_opt="${role_opt:-2}" ;;
+        slave)      echo -en "  Opción [3 = actual slave]: "; read -r role_opt; role_opt="${role_opt:-3}" ;;
+    esac
+
+    local new_role
+    case "$role_opt" in
+        2) new_role="master" ;;
+        3) new_role="slave" ;;
+        *) new_role="standalone" ;;
+    esac
+
+    db_exec "UPDATE node_config SET node_name='$node_name', node_role='$new_role' WHERE id=1"
+
+    print_ok "Nodo configurado: ${node_name} (${new_role})"
+
+    if [ "$new_role" = "slave" ]; then
+        echo ""
+        if confirm "¿Configurar conexión al Master ahora?"; then
+            net_configure_master_conn
+            return
+        fi
+    fi
+
+    pause
+}
+
+net_configure_master_conn() {
+    local role
+    role=$(get_node_role)
+    if [ "$role" != "slave" ]; then
+        print_warn "Solo los nodos slave necesitan conexión al master"
+        pause
+        return
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}CONEXIÓN AL MASTER${NC}"
+    print_separator
+
+    local old_host old_port old_user old_key old_path old_smode old_sint old_ssamba old_spush old_sauto
+    local orow
+    orow=$(db_query "SELECT master_host, master_port, master_user, master_ssh_key, master_path,
+                     sync_mode, sync_interval, sync_samba_catalog, push_status, autonomous_on_fail
+                     FROM node_config WHERE id=1")
+    IFS='|' read -r old_host old_port old_user old_key old_path old_smode old_sint old_ssamba old_spush old_sauto <<< "$orow"
+
+    local host port user key path smode sint ssamba spush sauto
+
+    read_input "Host del master (IP/hostname) [$old_host]" host "${old_host}"
+    read_input "Puerto SSH [$old_port]" port "${old_port:-22}"
+    read_input "Usuario SSH [$old_user]" user "${old_user}"
+    read_input "Ruta llave SSH privada [$old_key]" key "${old_key:-$HOME/.ssh/id_rsa}"
+    read_input "Ruta LogMaster en el master [$old_path]" path "${old_path}"
+
+    echo ""
+    echo "  Modo de sincronización:"
+    echo "    1) optional  - Si el master no responde, sigue operando"
+    echo "    2) mandatory - Requiere conexión al master"
+    local smode_opt
+    [ "$old_smode" = "mandatory" ] && smode_opt="2" || smode_opt="1"
+    echo -en "  Opción [$smode_opt]: "
+    read -r smode_in
+    smode_in="${smode_in:-$smode_opt}"
+    [ "$smode_in" = "2" ] && smode="mandatory" || smode="optional"
+
+    read_input "Intervalo sync en minutos [$old_sint]" sint "${old_sint:-5}"
+    read_input "Recibir catálogo Samba del master (1/0) [$old_ssamba]" ssamba "${old_ssamba:-1}"
+    read_input "Enviar estado al master (1/0) [$old_spush]" spush "${old_spush:-1}"
+    read_input "Operar autónomamente si master falla (1/0) [$old_sauto]" sauto "${old_sauto:-1}"
+
+    db_exec "UPDATE node_config SET
+             master_host='$host', master_port=$port, master_user='$user',
+             master_ssh_key='$key', master_path='$path',
+             sync_mode='$smode', sync_interval=$sint,
+             sync_samba_catalog=$ssamba, push_status=$spush, autonomous_on_fail=$sauto
+             WHERE id=1"
+
+    print_ok "Conexión al master configurada"
+    pause
+}
+
+net_test_master() {
+    echo ""
+    local row
+    row=$(db_query "SELECT master_host, master_port, master_user, master_ssh_key, master_path FROM node_config WHERE id=1")
+    IFS='|' read -r host port user key path <<< "$row"
+
+    if [ -z "$host" ] || [ -z "$user" ]; then
+        print_err "Conexión al master no configurada"
+        pause
+        return
+    fi
+
+    print_info "Probando SSH a ${user}@${host}:${port}..."
+
+    local result
+    result=$(sync_test_connection "$host" "$port" "$user" "$key" "$path")
+
+    if [ "$result" = "OK" ]; then
+        print_ok "Conexión exitosa al master"
+        # Obtener info del master
+        local master_role
+        master_role=$(ssh_exec "$host" "$port" "$user" "$key" \
+            "sqlite3 '${path}/data/logmaster.db' \"SELECT node_role FROM node_config WHERE id=1\"" 2>/dev/null)
+        if [ -n "$master_role" ]; then
+            print_info "Rol remoto: $master_role"
+        fi
+    else
+        print_err "$result"
+    fi
+    pause
+}
+
+net_register_slave() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master puede registrar slaves"; pause; return; }
+
+    echo ""
+    echo -e "  ${BOLD}REGISTRAR NUEVO SLAVE${NC}"
+    print_separator
+
+    local sname host port user key rpath
+
+    read_input "Nombre del slave" sname ""
+    [ -z "$sname" ] && { print_err "Nombre requerido"; pause; return; }
+
+    read_input "Host (IP o hostname)" host ""
+    [ -z "$host" ] && { print_err "Host requerido"; pause; return; }
+
+    read_input "Puerto SSH" port "22"
+    read_input "Usuario SSH" user ""
+    [ -z "$user" ] && { print_err "Usuario requerido"; pause; return; }
+
+    read_input "Ruta llave SSH privada" key "$HOME/.ssh/id_rsa"
+    read_input "Ruta LogMaster en el slave" rpath ""
+
+    # Probar conexión
+    print_info "Probando conexión..."
+    local test_result
+    test_result=$(sync_test_connection "$host" "$port" "$user" "$key" "$rpath")
+
+    if [ "$test_result" != "OK" ]; then
+        print_warn "Advertencia: $test_result"
+        if ! confirm "¿Registrar de todas formas?"; then
+            pause
+            return
+        fi
+    else
+        print_ok "Conexión verificada"
+    fi
+
+    # Obtener node_id del slave
+    local remote_node_id=""
+    if [ -n "$rpath" ]; then
+        remote_node_id=$(ssh_exec "$host" "$port" "$user" "$key" \
+            "sqlite3 '${rpath}/data/logmaster.db' \"SELECT node_id FROM node_config WHERE id=1\"" 2>/dev/null)
+    fi
+
+    if [ -z "$remote_node_id" ]; then
+        remote_node_id=$(echo "$host" | md5sum | cut -c1-16)
+        print_warn "No se pudo obtener node_id, usando hash: $remote_node_id"
+    fi
+
+    db_exec "INSERT INTO registered_nodes (node_id, node_name, host, port, ssh_user, ssh_key, remote_path, status)
+             VALUES ('$remote_node_id', '$sname', '$host', $port, '$user', '$key', '$rpath', 'unknown')"
+
+    print_ok "Slave '$sname' registrado ($host)"
+    pause
+}
+
+net_remove_slave() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master"; pause; return; }
+
+    echo ""
+    read_input "ID del slave a eliminar" del_id ""
+    [ -z "$del_id" ] && return
+
+    local sname
+    sname=$(db_get "SELECT node_name FROM registered_nodes WHERE id=$del_id")
+    [ -z "$sname" ] && { print_err "ID no encontrado"; pause; return; }
+
+    if confirm "¿Eliminar slave '$sname'?"; then
+        db_exec "DELETE FROM registered_nodes WHERE id=$del_id"
+        print_ok "Slave eliminado"
+    fi
+    pause
+}
+
+net_collect_all() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master"; pause; return; }
+
+    echo ""
+    print_info "Recolectando estado de todos los slaves..."
+    echo ""
+
+    sync_collect_all 2>&1 | while IFS= read -r line; do
+        echo "  $line"
+    done
+
+    print_ok "Recolección completada"
+    pause
+}
+
+net_push_samba_all() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master"; pause; return; }
+
+    echo ""
+    print_info "Distribuyendo catálogo Samba a todos los slaves..."
+
+    sync_push_samba_all
+
+    print_ok "Distribución completada"
+    pause
+}
+
+net_slave_detail() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master"; pause; return; }
+
+    echo ""
+    read_input "ID del slave" slave_id ""
+    [ -z "$slave_id" ] && return
+
+    local srow
+    srow=$(db_query "SELECT node_id, node_name, host, port, status, last_seen, last_sync
+                     FROM registered_nodes WHERE id=$slave_id")
+    [ -z "$srow" ] && { print_err "ID no encontrado"; pause; return; }
+
+    IFS='|' read -r snid sname shost sport sstatus slast_seen slast_sync <<< "$srow"
+
+    echo ""
+    echo -e "  ${BOLD}DETALLE DE SLAVE: $sname${NC}"
+    print_separator
+    echo -e "  Node ID:    ${WHITE}$snid${NC}"
+    echo -e "  Host:       ${WHITE}$shost:$sport${NC}"
+    echo -e "  Estado:     ${WHITE}$sstatus${NC}"
+    echo -e "  Visto:      ${WHITE}${slast_seen:-Nunca}${NC}"
+    echo -e "  Sync:       ${WHITE}${slast_sync:-Nunca}${NC}"
+
+    # Buscar último estado recibido
+    local ns_row
+    ns_row=$(db_query "SELECT hostname, uptime, dirs_count, dests_count, schedules_count,
+                       last_exec_status, exec_ok_24h, exec_fail_24h, disk_usage, cron_installed, timestamp
+                       FROM node_status WHERE node_id='$snid' ORDER BY id DESC LIMIT 1")
+
+    if [ -n "$ns_row" ]; then
+        IFS='|' read -r nhost nup ndirs ndests nscheds nlast nok nfail ndisk ncron nts <<< "$ns_row"
+        echo ""
+        echo -e "  ${BOLD}Último reporte (${nts}):${NC}"
+        echo -e "  Hostname:     ${WHITE}$nhost${NC}"
+        echo -e "  Uptime:       ${WHITE}$nup${NC}"
+        echo -e "  Directorios:  ${WHITE}$ndirs${NC}"
+        echo -e "  Destinos:     ${WHITE}$ndests${NC}"
+        echo -e "  Schedules:    ${WHITE}$nscheds${NC}"
+        echo -e "  Últ.ejecución:${WHITE} $nlast${NC}"
+        echo -e "  OK 24h:       ${GREEN}$nok${NC}"
+        echo -e "  Fallos 24h:   ${RED}$nfail${NC}"
+        echo -e "  Disco:        ${WHITE}$ndisk${NC}"
+        echo -e "  Cron:         $([ "$ncron" = "1" ] && echo "${GREEN}Instalado${NC}" || echo "${RED}No${NC}")"
+    else
+        print_warn "Sin reportes de estado recibidos"
+    fi
+
+    pause
+}
+
+net_force_sync() {
+    echo ""
+    print_info "Ejecutando sincronización manual..."
+    echo ""
+
+    "${SCRIPT_DIR}/logmaster-sync.sh" 2>&1 | while IFS= read -r line; do
+        echo "  $line"
+    done
+
+    print_ok "Sincronización completada"
+    pause
+}
+
+net_sync_log() {
+    echo ""
+    echo -e "  ${BOLD}HISTORIAL DE SINCRONIZACIONES${NC}"
+    print_separator
+    echo ""
+
+    local slogs
+    slogs=$(db_query "SELECT timestamp, direction, remote_host, status, items_synced, message
+                      FROM sync_log ORDER BY id DESC LIMIT 20")
+
+    if [ -n "$slogs" ]; then
+        printf "  ${WHITE}%-20s %-8s %-18s %-8s %-6s %-25s${NC}\n" \
+            "Fecha" "Dir" "Host" "Estado" "Items" "Mensaje"
+        print_separator
+        while IFS='|' read -r ts dir host status items msg; do
+            local color
+            [ "$status" = "success" ] && color="$GREEN" || color="$RED"
+            printf "  %-20s %-8s %-18s ${color}%-8s${NC} %-6s %-25s\n" \
+                "$ts" "$dir" "${host:0:18}" "$status" "$items" "${msg:0:25}"
+        done <<< "$slogs"
+    else
+        print_warn "Sin registros de sincronización"
+    fi
+
+    pause
+}
+
+net_generate_ssh_key() {
+    echo ""
+    local key_path="$HOME/.ssh/logmaster_rsa"
+
+    if [ -f "$key_path" ]; then
+        print_warn "Ya existe una llave en: $key_path"
+        if ! confirm "¿Regenerar?"; then
+            echo ""
+            echo -e "  Llave pública actual:"
+            echo -e "  ${DIM}$(cat "${key_path}.pub" 2>/dev/null)${NC}"
+            pause
+            return
+        fi
+    fi
+
+    print_info "Generando par de llaves SSH..."
+    ssh-keygen -t rsa -b 4096 -f "$key_path" -N "" -C "logmaster@$(hostname)" 2>/dev/null
+
+    if [ -f "$key_path" ]; then
+        print_ok "Llaves generadas:"
+        echo -e "  Privada: ${WHITE}${key_path}${NC}"
+        echo -e "  Pública: ${WHITE}${key_path}.pub${NC}"
+        echo ""
+        echo -e "  ${BOLD}Copie esta llave pública en los servidores remotos:${NC}"
+        echo -e "  ${CYAN}$(cat "${key_path}.pub")${NC}"
+        echo ""
+        echo -e "  Comando para copiar:"
+        echo -e "  ${DIM}ssh-copy-id -i ${key_path}.pub usuario@servidor${NC}"
+    else
+        print_err "Error al generar llaves"
+    fi
+    pause
+}
+
+# ============================================================
+# CANALES DE COMUNICACIÓN (master)
+# ============================================================
+
+channels_menu() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master gestiona canales"; pause; return; }
+
+    while true; do
+        clear
+        print_header
+        echo -e "  ${BOLD}CANALES DE COMUNICACIÓN${NC}"
+        print_separator
+        echo ""
+
+        local channels
+        channels=$(db_query "SELECT id, name, channel_type, frequency, active, last_sent FROM comm_channels ORDER BY id")
+
+        if [ -n "$channels" ]; then
+            printf "  ${WHITE}%-4s %-20s %-10s %-10s %-8s %-20s${NC}\n" \
+                "ID" "Nombre" "Tipo" "Frecuencia" "Estado" "Último envío"
+            print_separator
+            while IFS='|' read -r cid cname ctype cfreq cactive clast; do
+                local estado
+                [ "$cactive" = "1" ] && estado="${GREEN}Activo${NC}" || estado="${RED}Inactivo${NC}"
+                printf "  %-4s %-20s %-10s %-10s ${estado}  %-20s\n" \
+                    "$cid" "$cname" "$ctype" "$cfreq" "${clast:--}"
+            done <<< "$channels"
+        else
+            print_warn "Sin canales configurados"
+        fi
+
+        echo ""
+        echo "  a) Agregar canal"
+        echo "  e) Editar canal"
+        echo "  d) Eliminar canal"
+        echo "  t) Enviar reporte de prueba"
+        echo "  v) Volver"
+        echo ""
+        echo -en "  ${CYAN}Opción:${NC} "
+        read -r opt
+        case "$opt" in
+            a) channel_add ;;
+            e) channel_edit ;;
+            d) channel_delete ;;
+            t) channel_test ;;
+            v) return ;;
+        esac
+    done
+}
+
+channel_add() {
+    echo ""
+    echo -e "  ${BOLD}NUEVO CANAL DE COMUNICACIÓN${NC}"
+    print_separator
+
+    local name ctype
+
+    read_input "Nombre del canal" name ""
+    [ -z "$name" ] && { print_err "Nombre requerido"; pause; return; }
+
+    echo "  Tipo:"
+    echo "    1) email   - Reporte por correo"
+    echo "    2) file    - Reporte en archivo"
+    echo "    3) webhook - Envío a URL"
+    echo -en "  Opción: "
+    read -r type_opt
+
+    local to_email="" output_path="" webhook_url=""
+
+    case "$type_opt" in
+        1) ctype="email";   read_input "Email(s) destinatario" to_email "" ;;
+        2) ctype="file";    read_input "Ruta del archivo de salida" output_path "" ;;
+        3) ctype="webhook"; read_input "URL del webhook" webhook_url "" ;;
+        *) print_err "Tipo inválido"; pause; return ;;
+    esac
+
+    echo ""
+    echo "  Frecuencia:"
+    echo "    1) realtime - Cada ciclo de sync"
+    echo "    2) hourly   - Cada hora"
+    echo "    3) daily    - Una vez al día"
+    echo "    4) weekly   - Una vez a la semana"
+    echo -en "  Opción [3]: "
+    read -r freq_opt
+
+    local frequency report_time report_day
+    case "$freq_opt" in
+        1) frequency="realtime"; report_time=""; report_day="" ;;
+        2) frequency="hourly"; report_time=""; report_day="" ;;
+        4) frequency="weekly"
+           read_input "Hora (HH:MM)" report_time "08:00"
+           echo "  Día: 1=Lun 2=Mar 3=Mié 4=Jue 5=Vie 6=Sáb 7=Dom"
+           read_input "Día" report_day "1"
+           ;;
+        *) frequency="daily"
+           read_input "Hora (HH:MM)" report_time "08:00"
+           report_day=""
+           ;;
+    esac
+
+    read_input "Nodos a incluir (* = todos, o CSV de node_ids)" include_nodes "*"
+
+    db_exec "INSERT INTO comm_channels (name, channel_type, to_email, output_path, webhook_url,
+             include_nodes, frequency, report_time, report_day)
+             VALUES ('$name', '$ctype', '$to_email', '$output_path', '$webhook_url',
+             '$include_nodes', '$frequency', '${report_time:-00:00}', '${report_day:-1}')"
+
+    print_ok "Canal '$name' creado"
+    pause
+}
+
+channel_edit() {
+    echo ""
+    read_input "ID del canal a editar" edit_id ""
+    [ -z "$edit_id" ] && return
+
+    local active
+    local old_active
+    old_active=$(db_get "SELECT active FROM comm_channels WHERE id=$edit_id")
+    [ -z "$old_active" ] && { print_err "ID no encontrado"; pause; return; }
+
+    read_input "Activo (1/0) [$old_active]" active "$old_active"
+    db_exec "UPDATE comm_channels SET active=$active WHERE id=$edit_id"
+
+    print_ok "Canal actualizado"
+    pause
+}
+
+channel_delete() {
+    echo ""
+    read_input "ID del canal a eliminar" del_id ""
+    [ -z "$del_id" ] && return
+
+    if confirm "¿Eliminar canal #$del_id?"; then
+        db_exec "DELETE FROM comm_channels WHERE id=$del_id"
+        print_ok "Canal eliminado"
+    fi
+    pause
+}
+
+channel_test() {
+    echo ""
+    read_input "ID del canal para enviar prueba" test_id ""
+    [ -z "$test_id" ] && return
+
+    print_info "Generando y enviando reporte..."
+    send_channel_report "$test_id"
+    print_ok "Reporte enviado"
     pause
 }
 

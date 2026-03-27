@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# LogMaster v1.1 - Dispatcher Principal (ejecutado por cron)
+# LogMaster v2.0 - Dispatcher Principal (ejecutado por cron)
 # Evalúa calendario interno, itera destinos por directorio
 # ============================================================
 
@@ -17,7 +17,13 @@ fi
 
 trap 'release_lock' EXIT
 
-log_info "=== Inicio de ciclo de verificación ==="
+# Identidad del nodo para el log
+NODE_ID=$(db_get "SELECT node_id FROM node_config WHERE id=1")
+NODE_NAME=$(db_get "SELECT node_name FROM node_config WHERE id=1")
+NODE_ID="${NODE_ID:-local}"
+NODE_NAME="${NODE_NAME:-$(hostname)}"
+
+log_info "=== Inicio de ciclo [$NODE_NAME] ==="
 
 # ============================================================
 # Procesar un destino específico para un directorio
@@ -61,8 +67,8 @@ process_destination() {
         if ! samba_test_connection "$server" "$share" "$username" "$password" "$domain" "$port"; then
             local msg="No se pudo conectar a Samba: //${server}/${share}"
             log_error "  $msg"
-            db_exec "INSERT INTO execution_log (directory_id, destination_id, source_path, dest_label, status, message)
-                     VALUES ($dir_id, $dest_id, '$src_path', '$dest_label', 'error', '$msg')"
+            db_exec "INSERT INTO execution_log (node_id, node_name, directory_id, destination_id, source_path, dest_label, status, message)
+                     VALUES ('$NODE_ID', '$NODE_NAME', $dir_id, $dest_id, '$src_path', '$dest_label', 'error', '$msg')"
             notify_result "error" "$src_path" "$dest_label" "0" "0" "$msg" ""
             return
         fi
@@ -139,8 +145,8 @@ process_destination() {
     safe_details=$(echo -e "$detail_lines" | sed "s/'/''/g")
     safe_label=$(echo "$dest_label" | sed "s/'/''/g")
 
-    db_exec "INSERT INTO execution_log (directory_id, destination_id, source_path, dest_label, status, files_processed, files_failed, message, details)
-             VALUES ($dir_id, $dest_id, '$src_path', '$safe_label', '$final_status', $count_ok, $count_fail, '$final_msg', '$safe_details')"
+    db_exec "INSERT INTO execution_log (node_id, node_name, directory_id, destination_id, source_path, dest_label, status, files_processed, files_failed, message, details)
+             VALUES ('$NODE_ID', '$NODE_NAME', $dir_id, $dest_id, '$src_path', '$safe_label', '$final_status', $count_ok, $count_fail, '$final_msg', '$safe_details')"
 
     log_info "  Resultado destino: $final_msg"
 
@@ -174,8 +180,8 @@ process_schedule() {
     if [ ! -d "$src_path" ]; then
         local msg="Directorio fuente no existe: $src_path"
         log_error "$msg"
-        db_exec "INSERT INTO execution_log (directory_id, source_path, status, message)
-                 VALUES ($dir_id, '$src_path', 'error', '$msg')"
+        db_exec "INSERT INTO execution_log (node_id, node_name, directory_id, source_path, status, message)
+                 VALUES ('$NODE_ID', '$NODE_NAME', $dir_id, '$src_path', 'error', '$msg')"
         notify_result "error" "$src_path" "N/A" "0" "0" "$msg" ""
         # Actualizar schedule de todas formas
         local now next

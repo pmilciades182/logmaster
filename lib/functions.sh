@@ -478,7 +478,7 @@ notify_result() {
 print_header() {
     echo -e "${CYAN}"
     echo "╔══════════════════════════════════════════════╗"
-    echo "║          LOGMASTER v1.1.0                    ║"
+    echo "║          LOGMASTER v2.0.0                    ║"
     echo "║   Sistema de Transferencia de Archivos       ║"
     echo "╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
