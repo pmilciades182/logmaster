@@ -1634,6 +1634,8 @@ network_menu() {
             echo "   7) Distribuir catálogo Samba a slaves"
             echo "   8) Gestionar canales de comunicación"
             echo "   9) Ver estado detallado de un slave"
+            echo -e "  ${YELLOW}13) Handoff: transferir master a otro nodo${NC}"
+            echo "  14) Detectar conflicto de masters"
         fi
         echo "  10) Forzar sincronización ahora"
         echo "  11) Ver historial de sincronizaciones"
@@ -1655,6 +1657,8 @@ network_menu() {
             10) net_force_sync ;;
             11) net_sync_log ;;
             12) net_generate_ssh_key ;;
+            13) net_handoff ;;
+            14) net_detect_conflict ;;
             v)  return ;;
         esac
     done
@@ -1670,6 +1674,9 @@ net_configure_node() {
     old_role=$(db_get "SELECT node_role FROM node_config WHERE id=1")
 
     read_input "Nombre del nodo [$old_name]" node_name "${old_name:-$(hostname)}"
+
+    # Actualizar nombre siempre
+    db_exec "UPDATE node_config SET node_name='$node_name' WHERE id=1"
 
     echo ""
     echo "  Rol del nodo:"
@@ -1691,17 +1698,57 @@ net_configure_node() {
         *) new_role="standalone" ;;
     esac
 
-    db_exec "UPDATE node_config SET node_name='$node_name', node_role='$new_role' WHERE id=1"
-
-    print_ok "Nodo configurado: ${node_name} (${new_role})"
-
-    if [ "$new_role" = "slave" ]; then
-        echo ""
-        if confirm "¿Configurar conexión al Master ahora?"; then
-            net_configure_master_conn
-            return
-        fi
+    if [ "$old_role" = "$new_role" ]; then
+        print_ok "Nodo actualizado: ${node_name} (sin cambio de rol)"
+        pause
+        return
     fi
+
+    # Validación pre-cambio
+    echo ""
+    print_info "Validando cambio de rol: ${old_role} → ${new_role}..."
+
+    local validation
+    validation=$(role_change_validate "$old_role" "$new_role")
+    local val_status="${validation%%:*}"
+    local val_msg="${validation#*:}"
+
+    case "$val_status" in
+        ERROR)
+            print_err "$val_msg"
+            pause
+            return
+            ;;
+        WARN)
+            print_warn "$val_msg"
+            if ! confirm "¿Continuar con el cambio de rol?"; then
+                pause
+                return
+            fi
+            ;;
+        OK|SAME)
+            ;;
+    esac
+
+    # Ejecutar cambio seguro
+    echo ""
+    print_info "Ejecutando cambio de rol..."
+    role_change_execute "$old_role" "$new_role"
+
+    print_ok "Rol cambiado: ${old_role} → ${new_role}"
+    echo ""
+
+    case "$new_role" in
+        slave)
+            if confirm "¿Configurar conexión al Master ahora?"; then
+                net_configure_master_conn
+                return
+            fi
+            ;;
+        master)
+            print_info "Registre slaves desde la opción 4 de este menú"
+            ;;
+    esac
 
     pause
 }
@@ -2025,6 +2072,135 @@ net_generate_ssh_key() {
     else
         print_err "Error al generar llaves"
     fi
+    pause
+}
+
+net_handoff() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master puede hacer handoff"; pause; return; }
+
+    echo ""
+    echo -e "  ${BOLD}${YELLOW}HANDOFF: TRANSFERIR ROL DE MASTER${NC}"
+    print_separator
+    echo ""
+    echo -e "  ${YELLOW}Esta operación transferirá el rol de master, los slaves registrados,${NC}"
+    echo -e "  ${YELLOW}canales de comunicación y catálogo Samba compartido al nodo destino.${NC}"
+    echo -e "  ${YELLOW}Este nodo se convertirá en slave del nuevo master.${NC}"
+    echo ""
+
+    # Mostrar slaves registrados como posibles destinos
+    local slaves
+    slaves=$(db_query "SELECT id, node_name, host, port, ssh_user, ssh_key, remote_path FROM registered_nodes WHERE active=1")
+
+    if [ -n "$slaves" ]; then
+        echo -e "  ${BOLD}Slaves registrados (posibles destinos):${NC}"
+        while IFS='|' read -r sid sname shost sport suser skey spath; do
+            echo "    [$sid] $sname ($shost)"
+        done <<< "$slaves"
+        echo ""
+    fi
+
+    echo "  Puede elegir un slave registrado o ingresar datos manualmente."
+    echo -en "  ID de slave [o 'm' para manual]: "
+    read -r handoff_opt
+
+    local t_host t_port t_user t_key t_path
+
+    if [ "$handoff_opt" = "m" ]; then
+        read_input "Host destino" t_host ""
+        read_input "Puerto SSH" t_port "22"
+        read_input "Usuario SSH" t_user ""
+        read_input "Llave SSH" t_key "$HOME/.ssh/logmaster_rsa"
+        read_input "Ruta LogMaster en destino" t_path ""
+    else
+        local srow
+        srow=$(db_query "SELECT host, port, ssh_user, ssh_key, remote_path FROM registered_nodes WHERE id=$handoff_opt AND active=1")
+        [ -z "$srow" ] && { print_err "ID no válido"; pause; return; }
+        IFS='|' read -r t_host t_port t_user t_key t_path <<< "$srow"
+    fi
+
+    [ -z "$t_host" ] || [ -z "$t_user" ] || [ -z "$t_path" ] && { print_err "Datos incompletos"; pause; return; }
+
+    echo ""
+    echo -e "  Destino: ${WHITE}${t_user}@${t_host}:${t_port}  ${t_path}${NC}"
+    echo ""
+
+    if ! confirm "¿CONFIRMAR HANDOFF? Este nodo dejará de ser master"; then
+        pause
+        return
+    fi
+
+    echo ""
+    print_info "Ejecutando handoff..."
+
+    if master_handoff "$t_host" "$t_port" "$t_user" "$t_key" "$t_path"; then
+        echo ""
+        print_ok "Handoff completado exitosamente"
+        print_info "Nuevo master: $t_host"
+        print_info "Este nodo ahora es: slave"
+    else
+        print_err "Error durante el handoff"
+    fi
+
+    pause
+}
+
+net_detect_conflict() {
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { print_warn "Solo el master puede detectar conflictos"; pause; return; }
+
+    echo ""
+    print_info "Verificando integridad de la red..."
+    echo ""
+
+    local slaves
+    slaves=$(db_query "SELECT node_name, host, port, ssh_user, ssh_key, remote_path
+                       FROM registered_nodes WHERE active=1")
+
+    if [ -z "$slaves" ]; then
+        print_warn "Sin slaves registrados para verificar"
+        pause
+        return
+    fi
+
+    local my_host
+    my_host=$(hostname -I 2>/dev/null | awk '{print $1}')
+    local my_hostname
+    my_hostname=$(hostname)
+    local conflicts=0
+
+    while IFS='|' read -r sname shost sport suser skey spath; do
+        [ -z "$shost" ] && continue
+        echo -en "  Verificando ${sname} (${shost})... "
+
+        local remote_master
+        remote_master=$(ssh_exec "$shost" "$sport" "$suser" "$skey" \
+            "sqlite3 '${spath}/data/logmaster.db' \"SELECT master_host FROM node_config WHERE id=1\"" 2>/dev/null)
+
+        if [ -z "$remote_master" ]; then
+            echo -e "${YELLOW}Sin respuesta${NC}"
+        elif [ "$remote_master" = "$my_host" ] || [ "$remote_master" = "$my_hostname" ]; then
+            echo -e "${GREEN}OK${NC} (apunta a este master)"
+        else
+            echo -e "${RED}CONFLICTO${NC} → apunta a: ${remote_master}"
+            conflicts=$((conflicts + 1))
+        fi
+    done <<< "$slaves"
+
+    echo ""
+    if [ "$conflicts" -gt 0 ]; then
+        print_err "$conflicts slave(s) apuntan a otro master"
+        echo ""
+        echo -e "  ${YELLOW}Opciones para resolver:${NC}"
+        echo "  - Verificar que no haya otro master activo en la red"
+        echo "  - Los slaves afectados pueden ser reconfigurados:"
+        echo "    menú 10 → opción 7 (Distribuir catálogo actualiza conexión)"
+    else
+        print_ok "Sin conflictos detectados. Todos los slaves apuntan a este master."
+    fi
+
     pause
 }
 

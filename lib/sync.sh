@@ -682,3 +682,358 @@ acquire_sync_lock() {
 release_sync_lock() {
     rm -f "$SYNC_LOCK"
 }
+
+# ============================================================
+# ROTACIÓN SEGURA DE ROLES
+# ============================================================
+
+# Archivo de transición: el daemon sync lo respeta
+ROLE_TRANSITION_FLAG="/tmp/logmaster_role_transition"
+
+# Validar si es seguro cambiar de rol
+role_change_validate() {
+    local current_role="$1" new_role="$2"
+
+    # Mismo rol: nada que hacer
+    [ "$current_role" = "$new_role" ] && echo "SAME" && return 0
+
+    # Verificar que no hay sync en curso
+    if [ -f "$SYNC_LOCK" ]; then
+        local lock_pid
+        lock_pid=$(cat "$SYNC_LOCK" 2>/dev/null)
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            echo "ERROR:Sincronización en curso (PID $lock_pid). Espere a que termine."
+            return 1
+        fi
+    fi
+
+    # Verificar que no hay transferencia en curso
+    if [ -f "$LOGMASTER_LOCK" ]; then
+        local lock_pid
+        lock_pid=$(cat "$LOGMASTER_LOCK" 2>/dev/null)
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            echo "ERROR:Transferencia en curso (PID $lock_pid). Espere a que termine."
+            return 1
+        fi
+    fi
+
+    # Validaciones específicas por transición
+    case "${current_role}_to_${new_role}" in
+        master_to_slave)
+            local n_slaves
+            n_slaves=$(db_get "SELECT COUNT(*) FROM registered_nodes WHERE active=1")
+            if [ "$n_slaves" -gt 0 ]; then
+                echo "WARN:Hay $n_slaves slaves registrados que perderán conexión con este master."
+                return 0
+            fi
+            ;;
+        slave_to_master)
+            local master_host
+            master_host=$(db_get "SELECT master_host FROM node_config WHERE id=1")
+            if [ -n "$master_host" ]; then
+                echo "WARN:Este nodo dejará de reportar al master ($master_host)."
+                return 0
+            fi
+            ;;
+    esac
+
+    echo "OK"
+    return 0
+}
+
+# Ejecutar cambio de rol con limpieza y notificación
+role_change_execute() {
+    local old_role="$1" new_role="$2"
+
+    # Activar flag de transición (daemon sync lo respeta)
+    echo "$(date '+%Y-%m-%d %H:%M:%S')|${old_role}|${new_role}" > "$ROLE_TRANSITION_FLAG"
+
+    log_info "ROLE: Iniciando transición ${old_role} -> ${new_role}"
+
+    # === PASO 1: Notificar a peers antes de cambiar ===
+
+    case "$old_role" in
+        master)
+            # Notificar a todos los slaves que este master se va
+            _notify_slaves_role_change "master_leaving"
+            ;;
+        slave)
+            # Notificar al master que este slave cambia de rol
+            _notify_master_role_change "slave_leaving" "$new_role"
+            ;;
+    esac
+
+    # === PASO 2: Limpiar estado específico del rol anterior ===
+
+    case "${old_role}_to_${new_role}" in
+        master_to_slave)
+            # Desactivar slaves registrados (no eliminar, por si vuelve a master)
+            db_exec "UPDATE registered_nodes SET active=0, status='offline'"
+            # Desactivar canales
+            db_exec "UPDATE comm_channels SET active=0"
+            log_info "ROLE: Slaves y canales desactivados (se conservan para posible retorno)"
+            ;;
+        master_to_standalone)
+            db_exec "UPDATE registered_nodes SET active=0, status='offline'"
+            db_exec "UPDATE comm_channels SET active=0"
+            log_info "ROLE: Slaves y canales desactivados"
+            ;;
+        slave_to_master)
+            # Limpiar config de conexión al master anterior (no borrar, desactivar)
+            db_exec "UPDATE node_config SET push_status=0 WHERE id=1"
+            # Reactivar slaves si los había (retorno a master)
+            local had_slaves
+            had_slaves=$(db_get "SELECT COUNT(*) FROM registered_nodes")
+            if [ "$had_slaves" -gt 0 ]; then
+                db_exec "UPDATE registered_nodes SET active=1, status='unknown'"
+                log_info "ROLE: $had_slaves slaves anteriores reactivados"
+            fi
+            # Reactivar canales si los había
+            local had_channels
+            had_channels=$(db_get "SELECT COUNT(*) FROM comm_channels")
+            if [ "$had_channels" -gt 0 ]; then
+                db_exec "UPDATE comm_channels SET active=1"
+                log_info "ROLE: $had_channels canales anteriores reactivados"
+            fi
+            ;;
+        slave_to_standalone)
+            db_exec "UPDATE node_config SET push_status=0 WHERE id=1"
+            log_info "ROLE: Push de estado desactivado"
+            ;;
+        standalone_to_slave)
+            db_exec "UPDATE node_config SET push_status=1 WHERE id=1"
+            log_info "ROLE: Push de estado activado"
+            ;;
+        standalone_to_master)
+            local had_slaves
+            had_slaves=$(db_get "SELECT COUNT(*) FROM registered_nodes")
+            if [ "$had_slaves" -gt 0 ]; then
+                db_exec "UPDATE registered_nodes SET active=1, status='unknown'"
+                log_info "ROLE: $had_slaves slaves anteriores reactivados"
+            fi
+            local had_channels
+            had_channels=$(db_get "SELECT COUNT(*) FROM comm_channels")
+            if [ "$had_channels" -gt 0 ]; then
+                db_exec "UPDATE comm_channels SET active=1"
+            fi
+            ;;
+    esac
+
+    # === PASO 3: Cambiar el rol en la BD ===
+
+    db_exec "UPDATE node_config SET node_role='$new_role' WHERE id=1"
+
+    # === PASO 4: Registrar en sync_log ===
+
+    db_exec "INSERT INTO sync_log (direction, status, message)
+             VALUES ('push', 'success', 'Cambio de rol: ${old_role} -> ${new_role}')"
+
+    # === PASO 5: Notificar a nuevos peers ===
+
+    case "$new_role" in
+        slave)
+            # Intentar registrarse en el master
+            _notify_master_role_change "slave_joining" "$new_role"
+            ;;
+        master)
+            # Notificar a slaves que hay nuevo master
+            _notify_slaves_role_change "new_master"
+            ;;
+    esac
+
+    # Quitar flag de transición
+    rm -f "$ROLE_TRANSITION_FLAG"
+
+    log_info "ROLE: Transición completada -> $new_role"
+    return 0
+}
+
+# Notificar al master sobre cambio de rol de este slave
+_notify_master_role_change() {
+    local event="$1" new_role="$2"
+
+    local row
+    row=$(db_query "SELECT master_host, master_port, master_user, master_ssh_key, master_path
+                    FROM node_config WHERE id=1")
+    [ -z "$row" ] && return
+
+    IFS='|' read -r mhost mport muser mkey mpath <<< "$row"
+    [ -z "$mhost" ] || [ -z "$muser" ] && return
+
+    local node_id
+    node_id=$(get_node_id)
+
+    # Enviar notificación via SSH
+    ssh_exec "$mhost" "$mport" "$muser" "$mkey" \
+        "sqlite3 '${mpath}/data/logmaster.db' \"UPDATE registered_nodes SET status='offline' WHERE node_id='$node_id'\"" 2>/dev/null
+
+    log_info "ROLE: Master notificado: $event"
+}
+
+# Notificar a slaves sobre cambio en este master
+_notify_slaves_role_change() {
+    local event="$1"
+
+    local slaves
+    slaves=$(db_query "SELECT host, port, ssh_user, ssh_key, remote_path, node_id
+                       FROM registered_nodes WHERE active=1")
+    [ -z "$slaves" ] && return
+
+    while IFS='|' read -r shost sport suser skey spath snid; do
+        [ -z "$shost" ] && continue
+
+        case "$event" in
+            master_leaving)
+                # Poner flag en el slave de que master no disponible
+                ssh_exec "$shost" "$sport" "$suser" "$skey" \
+                    "sqlite3 '${spath}/data/logmaster.db' \"INSERT INTO sync_log (direction,status,message) VALUES ('pull','error','Master se desconectó')\"" 2>/dev/null
+                ;;
+            new_master)
+                # Actualizar el master_host en el slave al host actual
+                local my_host
+                my_host=$(hostname -I 2>/dev/null | awk '{print $1}')
+                [ -z "$my_host" ] && my_host=$(hostname)
+                ssh_exec "$shost" "$sport" "$suser" "$skey" \
+                    "sqlite3 '${spath}/data/logmaster.db' \"UPDATE node_config SET master_host='$my_host' WHERE id=1\"" 2>/dev/null
+                ;;
+        esac
+
+        log_info "ROLE: Slave $shost notificado: $event"
+    done <<< "$slaves"
+}
+
+# Verificar conflicto de dos masters (ejecutar desde slave o master)
+detect_master_conflict() {
+    local role
+    role=$(get_node_role)
+
+    if [ "$role" = "master" ]; then
+        # Preguntar a cada slave quién es su master
+        local slaves
+        slaves=$(db_query "SELECT host, port, ssh_user, ssh_key, remote_path, node_name
+                           FROM registered_nodes WHERE active=1")
+        [ -z "$slaves" ] && return 0
+
+        local my_id
+        my_id=$(get_node_id)
+        local conflict=0
+
+        while IFS='|' read -r shost sport suser skey spath sname; do
+            [ -z "$shost" ] && continue
+            local remote_master_host
+            remote_master_host=$(ssh_exec "$shost" "$sport" "$suser" "$skey" \
+                "sqlite3 '${spath}/data/logmaster.db' \"SELECT master_host FROM node_config WHERE id=1\"" 2>/dev/null)
+
+            local my_host
+            my_host=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+            if [ -n "$remote_master_host" ] && [ "$remote_master_host" != "$my_host" ] && [ "$remote_master_host" != "$(hostname)" ]; then
+                log_warn "CONFLICT: Slave '$sname' apunta a otro master: $remote_master_host"
+                conflict=1
+            fi
+        done <<< "$slaves"
+
+        return $conflict
+    fi
+
+    return 0
+}
+
+# Handoff: transferir rol de master a otro nodo
+master_handoff() {
+    local target_host="$1" target_port="$2" target_user="$3" target_key="$4" target_path="$5"
+
+    local role
+    role=$(get_node_role)
+    [ "$role" != "master" ] && { echo "ERROR: Solo el master puede hacer handoff"; return 1; }
+
+    log_info "HANDOFF: Iniciando transferencia de master a $target_host"
+
+    # 1. Exportar registered_nodes al nuevo master
+    local nodes_sql
+    nodes_sql=$(mktemp /tmp/logmaster_handoff_XXXXXX.sql)
+
+    echo "-- Handoff de slaves desde $(hostname)" > "$nodes_sql"
+    local slaves
+    slaves=$(db_query "SELECT node_id, node_name, host, port, ssh_user, ssh_key, remote_path
+                       FROM registered_nodes WHERE active=1")
+
+    while IFS='|' read -r nid nname nhost nport nuser nkey npath; do
+        [ -z "$nid" ] && continue
+        cat >> "$nodes_sql" <<SQLEOF
+INSERT OR REPLACE INTO registered_nodes (node_id, node_name, host, port, ssh_user, ssh_key, remote_path, active, status)
+VALUES ('$nid', '$nname', '$nhost', $nport, '$nuser', '$nkey', '$npath', 1, 'unknown');
+SQLEOF
+    done <<< "$slaves"
+
+    # 2. Exportar canales de comunicación
+    local channels
+    channels=$(db_query "SELECT name, channel_type, to_email, output_path, webhook_url,
+                         include_nodes, frequency, report_time, report_day
+                         FROM comm_channels WHERE active=1")
+
+    while IFS='|' read -r cname ctype cemail cpath cwh cnodes cfreq ctime cday; do
+        [ -z "$cname" ] && continue
+        cat >> "$nodes_sql" <<SQLEOF
+INSERT OR REPLACE INTO comm_channels (name, channel_type, to_email, output_path, webhook_url, include_nodes, frequency, report_time, report_day, active)
+VALUES ('$cname', '$ctype', '$cemail', '$cpath', '$cwh', '$cnodes', '$cfreq', '$ctime', '$cday', 1);
+SQLEOF
+    done <<< "$channels"
+
+    # 3. Exportar catálogo Samba compartido
+    local samba
+    samba=$(db_query "SELECT name, server, share, remote_path, username, password, domain, port
+                      FROM samba_targets WHERE shared=1 AND active=1")
+
+    while IFS='|' read -r sname sserver sshare srpath suser spass sdomain sport; do
+        [ -z "$sname" ] && continue
+        cat >> "$nodes_sql" <<SQLEOF
+INSERT OR REPLACE INTO samba_targets (name, server, share, remote_path, username, password, domain, port, shared, origin_node, active)
+VALUES ('$sname', '$sserver', '$sshare', '$srpath', '$suser', '$spass', '$sdomain', $sport, 1, 'handoff', 1);
+SQLEOF
+    done <<< "$samba"
+
+    # Establecer rol master en el destino
+    echo "UPDATE node_config SET node_role='master' WHERE id=1;" >> "$nodes_sql"
+
+    # 4. Enviar y ejecutar en destino
+    local remote_incoming="${target_path}/data/incoming"
+    ssh_exec "$target_host" "$target_port" "$target_user" "$target_key" "mkdir -p ${remote_incoming}"
+
+    if scp_to "$target_host" "$target_port" "$target_user" "$target_key" \
+              "$nodes_sql" "${remote_incoming}/handoff.sql"; then
+
+        ssh_exec "$target_host" "$target_port" "$target_user" "$target_key" \
+            "sqlite3 '${target_path}/data/logmaster.db' < '${remote_incoming}/handoff.sql' && rm -f '${remote_incoming}/handoff.sql'"
+
+        log_info "HANDOFF: Datos transferidos a $target_host"
+
+        # 5. Notificar a todos los slaves el nuevo master
+        local new_master_ip
+        new_master_ip=$(ssh_exec "$target_host" "$target_port" "$target_user" "$target_key" \
+            "hostname -I 2>/dev/null | awk '{print \$1}'" 2>/dev/null)
+        [ -z "$new_master_ip" ] && new_master_ip="$target_host"
+
+        while IFS='|' read -r nid nname nhost nport nuser nkey npath; do
+            [ -z "$nid" ] && continue
+            ssh_exec "$nhost" "$nport" "$nuser" "$nkey" \
+                "sqlite3 '${npath}/data/logmaster.db' \"UPDATE node_config SET master_host='$new_master_ip' WHERE id=1\"" 2>/dev/null
+            log_info "HANDOFF: Slave $nname redirigido a $new_master_ip"
+        done <<< "$slaves"
+
+        # 6. Degradar este nodo a slave o standalone
+        role_change_execute "master" "slave"
+        db_exec "UPDATE node_config SET master_host='$new_master_ip',
+                 master_port=$target_port, master_user='$target_user',
+                 master_ssh_key='$target_key', master_path='$target_path',
+                 push_status=1 WHERE id=1"
+
+        log_info "HANDOFF: Completado. Nuevo master: $target_host, este nodo ahora es slave"
+        rm -f "$nodes_sql"
+        return 0
+    else
+        log_error "HANDOFF: Error al transferir datos a $target_host"
+        rm -f "$nodes_sql"
+        return 1
+    fi
+}

@@ -20,6 +20,12 @@ trap 'release_sync_lock' EXIT
 
 log_info "=== SYNC: Inicio de ciclo ==="
 
+# Si hay transición de rol en curso, no ejecutar
+if [ -f "$ROLE_TRANSITION_FLAG" ]; then
+    log_info "SYNC: Transición de rol en curso, saltando ciclo"
+    exit 0
+fi
+
 # Obtener rol y config del nodo
 ROLE=$(get_node_role)
 
