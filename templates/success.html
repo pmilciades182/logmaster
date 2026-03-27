@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>LogMaster - Transferencia Exitosa</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;padding:20px;">
+        <tr>
+            <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+                    <!-- Header -->
+                    <tr>
+                        <td style="background-color:#28a745;padding:25px;text-align:center;">
+                            <h1 style="color:#ffffff;margin:0;font-size:24px;">&#10004; Transferencia Exitosa</h1>
+                            <p style="color:#d4edda;margin:5px 0 0 0;font-size:14px;">LogMaster - Sistema de Transferencia de Archivos</p>
+                        </td>
+                    </tr>
+
+                    <!-- Body -->
+                    <tr>
+                        <td style="padding:30px;">
+                            <table width="100%" cellpadding="8" cellspacing="0" style="border-collapse:collapse;">
+                                <tr>
+                                    <td style="border-bottom:1px solid #eee;color:#666;width:40%;">Fecha y hora:</td>
+                                    <td style="border-bottom:1px solid #eee;color:#333;font-weight:bold;">{{TIMESTAMP}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="border-bottom:1px solid #eee;color:#666;">Servidor:</td>
+                                    <td style="border-bottom:1px solid #eee;color:#333;font-weight:bold;">{{HOSTNAME}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="border-bottom:1px solid #eee;color:#666;">Directorio origen:</td>
+                                    <td style="border-bottom:1px solid #eee;color:#333;font-weight:bold;">{{SOURCE_PATH}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="border-bottom:1px solid #eee;color:#666;">Destino:</td>
+                                    <td style="border-bottom:1px solid #eee;color:#333;font-weight:bold;">{{DEST_TARGET}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="border-bottom:1px solid #eee;color:#666;">Archivos procesados:</td>
+                                    <td style="border-bottom:1px solid #eee;color:#28a745;font-weight:bold;font-size:18px;">{{FILES_OK}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="border-bottom:1px solid #eee;color:#666;">Archivos fallidos:</td>
+                                    <td style="border-bottom:1px solid #eee;color:#333;">{{FILES_FAIL}}</td>
+                                </tr>
+                                <tr>
+                                    <td style="color:#666;">Mensaje:</td>
+                                    <td style="color:#333;">{{MESSAGE}}</td>
+                                </tr>
+                            </table>
+
+                            <!-- Detalle -->
+                            <div style="margin-top:20px;padding:15px;background-color:#f8f9fa;border-radius:4px;border-left:4px solid #28a745;">
+                                <h3 style="margin:0 0 10px 0;color:#333;font-size:14px;">Detalle de archivos:</h3>
+                                <p style="margin:0;color:#555;font-size:13px;font-family:monospace;white-space:pre-line;">{{DETAILS}}</p>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td style="background-color:#f8f9fa;padding:15px;text-align:center;border-top:1px solid #eee;">
+                            <p style="margin:0;color:#999;font-size:12px;">
+                                Generado por LogMaster v1.0.0 | {{HOSTNAME}} | {{TIMESTAMP}}
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

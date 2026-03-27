@@ -1,0 +1,13 @@
+# Base de datos
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Logs
+logs/*.log
+
+# Temporales
+/tmp/logmaster*
+*.swp
+*.swo
+*~
