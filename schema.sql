@@ -219,7 +219,8 @@ CREATE TABLE IF NOT EXISTS email_config (
     notify_error   INTEGER DEFAULT 1
 );
 
-INSERT OR IGNORE INTO email_config (id) VALUES (1);
+INSERT OR IGNORE INTO email_config (id, smtp_server, smtp_port, use_tls, from_email, to_email, username, password, notify_success, notify_error)
+VALUES (1, '192.168.250.30', 25, 0, 'no-reply@idesa.com.py', 'pablo.gonzalez@idesa.com.py', '', '', 0, 1);
 
 -- Historial de ejecuciones (con nodo de origen)
 CREATE TABLE IF NOT EXISTS execution_log (
