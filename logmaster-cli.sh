@@ -829,17 +829,41 @@ schedules_menu() {
         if [ -n "$scheds" ]; then
             printf "  ${WHITE}%-4s %-28s %-10s %-18s %-20s %-6s${NC}\n" "ID" "Directorio" "Tipo" "Programación" "Próxima ejecución" "Estado"
             print_separator
-            while IFS='|' read -r id path stype interval run_at days last_run next_run active; do
-                local estado prog
+            while IFS='|' read -r sid spath stype interval run_at days last_run next_run active; do
+                local estado prog display_time
                 [ "$active" = "1" ] && estado="${GREEN}Act${NC}" || estado="${RED}Ina${NC}"
+                [[ "$run_at" =~ ^[0-9]{4}$ ]] && display_time="${run_at:0:2}:${run_at:2:2}" || display_time="$run_at"
 
                 case "$stype" in
                     interval) prog="Cada ${interval}min" ;;
-                    daily)    prog="Diario ${run_at}" ;;
-                    weekly)   prog="Sem D:${days} ${run_at}" ;;
+                    daily)    prog="Diario ${display_time}" ;;
+                    weekly)   prog="Sem D:${days} ${display_time}" ;;
                 esac
 
-                printf "  %-4s %-28s %-10s %-18s %-20s ${estado}\n" "$id" "${path:0:28}" "$stype" "$prog" "${next_run:--}"
+                printf "  %-4s %-28s %-10s %-18s %-20s ${estado}\n" "$sid" "${spath:0:28}" "$stype" "$prog" "${next_run:--}"
+
+                local dests
+                dests=$(db_query "
+                    SELECT dd.dest_type, dd.action, dd.local_path, dd.remote_subdir,
+                           st.name, st.server, st.share
+                    FROM directory_destinations dd
+                    JOIN directories d ON d.id = dd.directory_id
+                    LEFT JOIN samba_targets st ON st.id = dd.samba_target_id
+                    WHERE d.source_path='${spath}' AND dd.active=1
+                ")
+                if [ -n "$dests" ]; then
+                    while IFS='|' read -r dtype action lpath rsubdir stname server share; do
+                        if [ "$dtype" = "samba" ]; then
+                            printf "       ${DIM}└── [Samba] %s → //%s/%s%s (%s)${NC}\n" \
+                                "$stname" "$server" "$share" "${rsubdir:+/$rsubdir}" "$action"
+                        else
+                            printf "       ${DIM}└── [Local] %s%s (%s)${NC}\n" \
+                                "$lpath" "${rsubdir:+/$rsubdir}" "$action"
+                        fi
+                    done <<< "$dests"
+                else
+                    printf "       ${DIM}└── (sin destinos configurados)${NC}\n"
+                fi
             done <<< "$scheds"
         else
             print_warn "No hay programaciones configuradas"
