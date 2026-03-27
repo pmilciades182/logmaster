@@ -517,6 +517,22 @@ read_input() {
     eval "$var_name='$input'"
 }
 
+read_time_hhmm() {
+    local var_name="$1" default="${2:-0800}"
+    local input
+    while true; do
+        echo -en "  Hora (HHMM) [${default}]: "
+        read -r input
+        input="${input:-$default}"
+        input="${input//:/}"
+        if [[ "$input" =~ ^[0-9]{4}$ ]]; then
+            eval "$var_name='${input:0:2}:${input:2:2}'"
+            return
+        fi
+        echo -e "  ${RED}✗ Formato inválido. Ingrese 4 dígitos, ej: 0800${NC}"
+    done
+}
+
 read_password() {
     local prompt="$1" var_name="$2"
     echo -en "  ${prompt}: "

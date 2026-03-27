@@ -157,11 +157,12 @@ show_directories_tree() {
         sched=$(db_query "SELECT schedule_type, interval_minutes, run_at_time, next_run, active FROM schedules WHERE directory_id=$dir_id LIMIT 1")
         if [ -n "$sched" ]; then
             IFS='|' read -r stype sint srun snext sact <<< "$sched"
-            local prog_txt
+            local prog_txt display_time
+            [[ "$srun" =~ ^[0-9]{4}$ ]] && display_time="${srun:0:2}:${srun:2:2}" || display_time="$srun"
             case "$stype" in
                 interval) prog_txt="Cada ${sint}min" ;;
-                daily)    prog_txt="Diario ${srun}" ;;
-                weekly)   prog_txt="Semanal ${srun}" ;;
+                daily)    prog_txt="Diario ${display_time}" ;;
+                weekly)   prog_txt="Semanal ${display_time}" ;;
             esac
             local sact_icon
             [ "$sact" = "1" ] && sact_icon="${GREEN}⏱${NC}" || sact_icon="${RED}⏱${NC}"
@@ -277,7 +278,7 @@ directories_add() {
 
         case "$sched_opt" in
             2)
-                read_input "Hora (HH:MM)" run_time "08:00"
+                read_time_hhmm run_time "0800"
                 while IFS= read -r did; do
                     [ -z "$did" ] && continue
                     local next
@@ -288,7 +289,7 @@ directories_add() {
                 print_ok "Programación diaria a las $run_time"
                 ;;
             3)
-                read_input "Hora (HH:MM)" run_time "08:00"
+                read_time_hhmm run_time "0800"
                 echo "  Días (1=Lun 2=Mar 3=Mié 4=Jue 5=Vie 6=Sáb 7=Dom)"
                 read_input "Días separados por coma" days "1,2,3,4,5"
                 while IFS= read -r did; do
@@ -891,14 +892,14 @@ schedules_add() {
     case "$stype_opt" in
         2)
             stype="daily"
-            read_input "Hora (HH:MM)" run_at "08:00"
+            read_time_hhmm run_at "0800"
             interval=0
             days="1,2,3,4,5,6,7"
             next=$(calculate_next_run "daily" "0" "$run_at" "")
             ;;
         3)
             stype="weekly"
-            read_input "Hora (HH:MM)" run_at "08:00"
+            read_time_hhmm run_at "0800"
             echo "  Días: 1=Lun 2=Mar 3=Mié 4=Jue 5=Vie 6=Sáb 7=Dom"
             read_input "Días separados por coma" days "1,2,3,4,5"
             interval=0
@@ -952,12 +953,12 @@ schedules_edit() {
             ;;
         2)
             stype="daily"
-            read_input "Hora HH:MM [$old_run_at]" run_at "${old_run_at:-08:00}"
+            read_time_hhmm run_at "${old_run_at//:/}"
             interval=0; days="1,2,3,4,5,6,7"
             ;;
         3)
             stype="weekly"
-            read_input "Hora HH:MM [$old_run_at]" run_at "${old_run_at:-08:00}"
+            read_time_hhmm run_at "${old_run_at//:/}"
             read_input "Días [$old_days]" days "$old_days"
             interval=0
             ;;
